@@ -1,6 +1,20 @@
 # BMM350 Rust Driver
 
-This is a Rust driver for the Bosch BMM350 Magnetometer. The BMM350 is a highly integrated, low power Magnetometer that provides precise angular rate measurements.
+This Rust driver reads the Bosch BMM350 magnetometer's three magnetic axes and
+sensor temperature.
+
+## Portable bus API
+
+The `portable` module supports a bus supplied for each operation. It keeps
+sensor state in `portable::Bmm350` while the application supplies I2C and delay
+operations through `i2c_bus::I2CBus` and `i2c_bus::Delay`. The bus trait is not
+specific to the BMM350, and `embedded-hal` 1.0 implementations can use it
+directly. A board with a shared I2C peripheral can use the driver without
+transferring ownership of that peripheral.
+
+After `initialize(&mut bus)`, `measure(&mut bus)` returns compensated X, Y, and
+Z magnetic fields in microtesla and temperature in degrees Celsius. The original
+`embedded-hal` API remains available for existing users.
 
 ## Features
 
