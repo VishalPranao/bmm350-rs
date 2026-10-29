@@ -27,6 +27,7 @@ const PMU_STATUS_BUSY: u8 = 0x01;
 const PMU_STATUS_NORMAL: u8 = 0x08;
 const PMU_STATUS_ILLEGAL_COMMAND: u8 = 0x10;
 const PMU_STATUS_COMMAND_SHIFT: u8 = 5;
+const PMU_EFFECTIVE_ODR_AVERAGING_MASK: u8 = 0x3f;
 
 pub const ODR_100_HZ: u8 = 0x04;
 pub const AVERAGING_4: u8 = 0x02;
@@ -340,10 +341,9 @@ impl Bmm350 {
         self.write_register(bus, Register::PMU_CMD_AGGR_SET, odr_and_averaging)?;
         self.write_register(bus, Register::PMU_CMD, PMU_CMD_UPDATE_ODR_AVERAGING)?;
         bus.delay_ms(1);
-        self.verify_pmu_command(bus, PMU_CMD_UPDATE_ODR_AVERAGING)?;
 
         let stored_odr_and_averaging = self.read_register(bus, Register::PMU_CMD_AGGR_SET)?;
-        if stored_odr_and_averaging & 0x3f != odr_and_averaging {
+        if stored_odr_and_averaging & PMU_EFFECTIVE_ODR_AVERAGING_MASK != odr_and_averaging {
             return Err(Error::ConfigurationRejected);
         }
 
@@ -354,8 +354,19 @@ impl Bmm350 {
 
         self.write_register(bus, Register::PMU_CMD, POWER_MODE_NORMAL)?;
         bus.delay_ms(38);
-        let status = self.verify_pmu_command(bus, POWER_MODE_NORMAL)?;
-        if status & PMU_STATUS_NORMAL == 0 {
+        let status = self.read_register(bus, Register::PMU_CMD_STATUS_0)?;
+        if status & PMU_STATUS_BUSY != 0 || status & PMU_STATUS_NORMAL == 0 {
+            return Err(Error::PmuCommand {
+                expected: POWER_MODE_NORMAL,
+                status,
+            });
+        }
+
+        // The ODR/averaging update takes effect with normal-mode sampling.
+        // Check the effective settings after that transition, rather than
+        // treating the immediate status after UPD_OAE as the final result.
+        let effective = self.read_register(bus, Register::PMU_CMD_STATUS_1)?;
+        if effective & PMU_EFFECTIVE_ODR_AVERAGING_MASK != odr_and_averaging {
             return Err(Error::ConfigurationRejected);
         }
         Ok(())
@@ -484,6 +495,51 @@ mod tests {
         response: [u8; MEASUREMENT_DATA_LENGTH + I2C_DUMMY_BYTE_COUNT],
     }
 
+    struct ConfigurationBus {
+        requested: u8,
+        axes: u8,
+        command: u8,
+        effective: u8,
+    }
+
+    impl I2CBus for ConfigurationBus {
+        type Error = ();
+
+        fn write(&mut self, _address: u8, bytes: &[u8]) -> Result<(), Self::Error> {
+            match bytes[0] {
+                Register::PMU_CMD_AGGR_SET => self.requested = bytes[1],
+                Register::PMU_CMD_AXIS_EN => self.axes = bytes[1],
+                Register::PMU_CMD => self.command = bytes[1],
+                _ => panic!("unexpected register write"),
+            }
+            Ok(())
+        }
+
+        fn write_read(
+            &mut self,
+            _address: u8,
+            write: &[u8],
+            read: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            let value = match write[0] {
+                Register::PMU_CMD_AGGR_SET => self.requested,
+                Register::PMU_CMD_AXIS_EN => self.axes,
+                Register::PMU_CMD_STATUS_0 if self.command == POWER_MODE_NORMAL => {
+                    PMU_STATUS_ILLEGAL_COMMAND | PMU_STATUS_NORMAL | (POWER_MODE_NORMAL << 5)
+                }
+                Register::PMU_CMD_STATUS_1 => self.effective,
+                _ => panic!("unexpected register read"),
+            };
+            read.copy_from_slice(&[0, 0, value]);
+            Ok(())
+        }
+    }
+
+    impl Delay for ConfigurationBus {
+        fn delay_us(&mut self, _microseconds: u16) {}
+        fn delay_ms(&mut self, _milliseconds: u16) {}
+    }
+
     impl I2CBus for FakeBus {
         type Error = ();
 
@@ -558,6 +614,27 @@ mod tests {
         assert!(
             (actual - expected).abs() <= TEST_TOLERANCE,
             "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn configuration_checks_effective_settings_after_normal_mode() {
+        let sensor = Bmm350::new(DEFAULT_I2C_ADDRESS);
+        let mut bus = ConfigurationBus {
+            requested: 0x14,
+            axes: 0x07,
+            command: POWER_MODE_SUSPEND,
+            effective: 0x24,
+        };
+
+        assert_eq!(sensor.configure_sensor(&mut bus), Ok(()));
+        assert_eq!(bus.requested, 0x24);
+        assert_eq!(bus.command, POWER_MODE_NORMAL);
+
+        bus.effective = 0x14;
+        assert_eq!(
+            sensor.configure_sensor(&mut bus),
+            Err(Error::ConfigurationRejected)
         );
     }
 
