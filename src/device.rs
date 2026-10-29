@@ -56,6 +56,17 @@ pub enum Error<E> {
     ConfigurationRejected,
 }
 
+/// Register values captured when the sensor rejects a PMU command.
+/// Reading ERR_REG clears its flags, so it is captured first.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct PmuDiagnostic {
+    pub error: Option<u8>,
+    pub requested: Option<u8>,
+    pub command: Option<u8>,
+    pub effective: Option<u8>,
+    pub status_after: Option<u8>,
+}
+
 /// One factory-compensated BMM350 sample.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Measurement {
@@ -137,6 +148,18 @@ impl Bmm350 {
         self.compensation = None;
         self.variant_id = None;
         self.initialized = false;
+    }
+
+    /// Capture PMU registers after a failed command. ERR_REG clears on read.
+    /// Missing values indicate that a diagnostic I2C read also failed.
+    pub fn pmu_diagnostic<B: I2CBus>(&self, bus: &mut B) -> PmuDiagnostic {
+        PmuDiagnostic {
+            error: self.read_register(bus, Register::ERR_REG).ok(),
+            requested: self.read_register(bus, Register::PMU_CMD_AGGR_SET).ok(),
+            command: self.read_register(bus, Register::PMU_CMD).ok(),
+            effective: self.read_register(bus, Register::PMU_CMD_STATUS_1).ok(),
+            status_after: self.read_register(bus, Register::PMU_CMD_STATUS_0).ok(),
+        }
     }
 
     /// Reset, identify, calibrate, and configure the sensor for normal mode.
